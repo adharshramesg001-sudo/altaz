@@ -1,0 +1,89 @@
+"""Integration test against a real Neo4j instance (skipped automatically if
+unreachable). Uses a `pytest::` key-value prefix throughout and deletes
+exactly those nodes on teardown -- this instance is shared with other
+projects (e.g. Cortex's GraphRAG graph), so no test here may touch anything
+outside its own prefixed nodes.
+"""
+
+import pytest
+
+from atlaz.graph_store.neo4j_writer import Neo4jWriter
+from atlaz.graph_store.schema import EdgeType, GraphEdge, GraphNode, NodeLabel
+
+TEST_PREFIX = "pytest::atlaz-integration"
+
+
+@pytest.fixture
+def writer(neo4j_config, require_neo4j):
+    w = Neo4jWriter(neo4j_config)
+    yield w
+    with w.driver.session(database=neo4j_config.database) as session:
+        session.run(
+            "MATCH (n) WHERE n.rule_id STARTS WITH $prefix OR n.entity_name STARTS WITH $prefix "
+            "DETACH DELETE n",
+            prefix=TEST_PREFIX,
+        )
+    w.close()
+
+
+def test_ensure_schema_is_idempotent(writer: Neo4jWriter):
+    writer.ensure_schema()
+    writer.ensure_schema()  # must not raise on the second run (IF NOT EXISTS)
+
+
+def test_write_batch_merges_nodes_and_edges(writer: Neo4jWriter, neo4j_config):
+    rule_node = GraphNode(
+        label=NodeLabel.BUSINESS_RULE,
+        key_value=f"{TEST_PREFIX}::rule1",
+        properties={"description": "test rule", "literal_value": "0.05", "tier": "extractable", "confidence": 1.0},
+    )
+    entity_node = GraphNode(
+        label=NodeLabel.DATA_ENTITY,
+        key_value=f"{TEST_PREFIX}::entity1",
+        properties={"source_kind": "orm_model", "tier": "extractable", "confidence": 1.0},
+    )
+    edge = GraphEdge(
+        edge_type=EdgeType.CONFLICTS_WITH,
+        source_label=NodeLabel.BUSINESS_RULE,
+        source_key=rule_node.key_value,
+        target_label=NodeLabel.DATA_ENTITY,
+        target_key=entity_node.key_value,
+        properties={"resolved_by": "reviewer@example.com"},
+    )
+
+    writer.write_batch([rule_node, entity_node], [edge])
+
+    with writer.driver.session(database=neo4j_config.database) as session:
+        result = session.run(
+            "MATCH (r:BusinessRule {rule_id: $rule_id})-[c:CONFLICTS_WITH]->(e:DataEntity {entity_name: $entity_id}) "
+            "RETURN r.description AS description, c.resolved_by AS resolved_by, r.last_verified AS last_verified",
+            rule_id=rule_node.key_value,
+            entity_id=entity_node.key_value,
+        )
+        record = result.single()
+
+    assert record is not None
+    assert record["description"] == "test rule"
+    assert record["resolved_by"] == "reviewer@example.com"
+    assert record["last_verified"] is not None
+
+
+def test_write_batch_is_idempotent_via_merge(writer: Neo4jWriter, neo4j_config):
+    node = GraphNode(
+        label=NodeLabel.BUSINESS_RULE,
+        key_value=f"{TEST_PREFIX}::rule2",
+        properties={"description": "v1", "literal_value": "1", "tier": "extractable", "confidence": 1.0},
+    )
+    writer.write_batch([node], [])
+    node.properties["description"] = "v2"
+    writer.write_batch([node], [])
+
+    with writer.driver.session(database=neo4j_config.database) as session:
+        result = session.run(
+            "MATCH (r:BusinessRule {rule_id: $rule_id}) RETURN count(r) AS c, r.description AS description",
+            rule_id=node.key_value,
+        )
+        record = result.single()
+
+    assert record["c"] == 1  # MERGE, not CREATE -- no duplicate node
+    assert record["description"] == "v2"  # properties updated in place
