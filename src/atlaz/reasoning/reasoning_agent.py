@@ -33,18 +33,27 @@ UNBUILT_CORNERS = {
 }
 
 _SCHEMA_SUMMARY = """
-Node labels: Capability(name, cohesion_score, tier, confidence, needs_review),
-BusinessRule(rule_id, description, literal_value, tier, confidence),
-Requirement(function_ref, inferred_behavior, tier, confidence),
-Component(name, architecture_style), Module(file_path, language),
-DataEntity(entity_name, source_kind, fields_json, tier, confidence),
-APIContract(route, method, handler_ref, tier, confidence),
-TestCase(name, file_path), SecurityControl(control_type, location, detail,
-regulation_hypothesis, tier, confidence), GlossaryTerm(term, definition,
-occurrence_count, tier, confidence), Gap(corner, tier, signal_found,
-still_open).
-Relationship types: IMPLEMENTS, DEPENDS_ON, VALIDATES, DOCUMENTS,
-CONFLICTS_WITH, DERIVED_FROM, OWNS.
+Technical graph: Repository(repo_id, name, primary_languages),
+Service(service_id, name, boundary_source, architecture_style) -- folder/
+component boundary, doubles as the LLD's Module container, File(file_id,
+path, language, classification), Class(class_id, name, file_id), Method
+(method_id, name, file_id, reachability), Table(table_id, name, source_kind,
+fields_json, tier, confidence), Database(database_id, name), API(api_id,
+route, method, handler_ref, spec_source, tier, confidence).
+Business graph: BusinessCapability(capability_id, name, cohesion_score,
+tier, confidence, strategic_context_gap), Feature(feature_id, name,
+confidence), Workflow(workflow_id, name, confidence), Step(step_id, name,
+sequence_order), BusinessRule(rule_id, description, literal_value, status,
+tier, confidence), DomainConcept(concept_id, term, definition,
+occurrence_count, tier, confidence), Gap(gap_id, category, status,
+signal_found, still_open).
+Codebase-specific extensions: Requirement(function_ref, inferred_behavior,
+tier, confidence), TestCase(name, file_path), SecurityControl(control_id,
+control_type, location, detail, regulation_hypothesis, tier, confidence).
+Relationship types: CONTAINS, DEFINES, CALLS, READS, WRITES, EXPOSES,
+INVOKES, OWNS, BELONGS_TO, DEPENDS_ON, HAS_FEATURE, HAS_WORKFLOW, HAS_STEP,
+GOVERNED_BY, USES, RELATES_TO, HAS_GAP, IMPLEMENTED_BY, REALIZED_BY,
+EXECUTES, IMPLEMENTS, VALIDATES, CONFLICTS_WITH, DERIVED_FROM.
 """.strip()
 
 _CYPHER_SCHEMA = {"type": "object", "properties": {"cypher": {"type": "string"}}, "required": ["cypher"]}
@@ -72,22 +81,22 @@ class AnsweredQuery:
 
 
 _DRIFT_QUERY = """
-MATCH (rule:BusinessRule)-[c:CONFLICTS_WITH]->(impl)
+MATCH (rule:BusinessRule)-[c:CONFLICTS_WITH]->(impl:Table)
 RETURN rule.rule_id AS rule_id, rule.literal_value AS rule_value,
-       labels(impl) AS impl_labels, impl.entity_name AS entity_name,
+       labels(impl) AS impl_labels, impl.name AS entity_name,
        c.field_name AS field_name, c.rule_value AS conflict_rule_value,
-       c.entity_value AS conflict_entity_value, c.resolved_by AS resolved_by,
-       c.resolution_note AS resolution_note, c.unresolved AS unresolved
+       c.table_value AS conflict_entity_value, c.status AS status,
+       c.unresolved AS unresolved
 """
 
 _PRODUCT_SYNTHESIS_QUERY = """
-MATCH (cap:Capability)
-OPTIONAL MATCH (cap)-[:OWNS]->(rule:BusinessRule)
-OPTIONAL MATCH (comp:Component)-[:IMPLEMENTS]->(cap)
-OPTIONAL MATCH (mod:Module)-[:IMPLEMENTS]->(req:Requirement)
-OPTIONAL MATCH (term:GlossaryTerm)
-RETURN cap.name AS capability, collect(DISTINCT rule.description) AS rules,
-       collect(DISTINCT comp.name) AS components,
+MATCH (cap:BusinessCapability)
+OPTIONAL MATCH (cap)-[:HAS_FEATURE]->(feat:Feature)-[:IMPLEMENTED_BY]->(svc:Service)
+OPTIONAL MATCH (svc)-[:OWNS]->(table:Table)
+OPTIONAL MATCH (mod:File)-[:IMPLEMENTS]->(req:Requirement)
+OPTIONAL MATCH (term:DomainConcept)
+RETURN cap.name AS capability, collect(DISTINCT svc.name) AS services,
+       collect(DISTINCT table.name) AS tables,
        collect(DISTINCT req.inferred_behavior) AS requirements,
        collect(DISTINCT term.term) AS vocabulary
 """
@@ -166,10 +175,17 @@ class ReasoningAgent:
         )
 
 
+_CITABLE_FIELDS = (
+    "rule_id", "entity_name", "capability", "capability_id", "route", "term", "concept_id",
+    "function_ref", "feature_id", "workflow_id", "method_id", "class_id", "table_id", "api_id",
+    "service_id", "file_id",
+)
+
+
 def _extract_cited_node_keys(records: list[dict]) -> list[str]:
     keys: list[str] = []
     for record in records:
-        for key in ("rule_id", "entity_name", "capability", "route", "term", "function_ref"):
+        for key in _CITABLE_FIELDS:
             value = record.get(key)
             if value:
                 keys.append(str(value))

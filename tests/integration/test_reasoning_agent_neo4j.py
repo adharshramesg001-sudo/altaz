@@ -24,23 +24,23 @@ def seeded_conflict(neo4j_config, require_neo4j):
     writer.write_batch(
         [
             GraphNode(label=NodeLabel.BUSINESS_RULE, key_value=rule_key, properties={"literal_value": "0.05"}),
-            GraphNode(label=NodeLabel.DATA_ENTITY, key_value=entity_key, properties={"source_kind": "orm_model"}),
+            GraphNode(label=NodeLabel.TABLE, key_value=entity_key, properties={"name": entity_key, "source_kind": "orm_model"}),
         ],
         [
             GraphEdge(
                 edge_type=EdgeType.CONFLICTS_WITH,
                 source_label=NodeLabel.BUSINESS_RULE,
                 source_key=rule_key,
-                target_label=NodeLabel.DATA_ENTITY,
+                target_label=NodeLabel.TABLE,
                 target_key=entity_key,
-                properties={"rule_value": "0.05", "entity_value": "0.045", "unresolved": True},
+                properties={"rule_value": "0.05", "table_value": "0.045", "status": "unresolved_written_both", "unresolved": True},
             )
         ],
     )
     yield rule_key, entity_key
     with writer.driver.session(database=neo4j_config.database) as session:
         session.run(
-            "MATCH (n) WHERE n.rule_id STARTS WITH $prefix OR n.entity_name STARTS WITH $prefix DETACH DELETE n",
+            "MATCH (n) WHERE n.rule_id STARTS WITH $prefix OR n.table_id STARTS WITH $prefix DETACH DELETE n",
             prefix=TEST_PREFIX,
         )
     writer.close()

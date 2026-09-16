@@ -19,7 +19,7 @@ def writer(neo4j_config, require_neo4j):
     yield w
     with w.driver.session(database=neo4j_config.database) as session:
         session.run(
-            "MATCH (n) WHERE n.rule_id STARTS WITH $prefix OR n.entity_name STARTS WITH $prefix "
+            "MATCH (n) WHERE n.rule_id STARTS WITH $prefix OR n.table_id STARTS WITH $prefix "
             "DETACH DELETE n",
             prefix=TEST_PREFIX,
         )
@@ -38,7 +38,7 @@ def test_write_batch_merges_nodes_and_edges(writer: Neo4jWriter, neo4j_config):
         properties={"description": "test rule", "literal_value": "0.05", "tier": "extractable", "confidence": 1.0},
     )
     entity_node = GraphNode(
-        label=NodeLabel.DATA_ENTITY,
+        label=NodeLabel.TABLE,
         key_value=f"{TEST_PREFIX}::entity1",
         properties={"source_kind": "orm_model", "tier": "extractable", "confidence": 1.0},
     )
@@ -46,17 +46,17 @@ def test_write_batch_merges_nodes_and_edges(writer: Neo4jWriter, neo4j_config):
         edge_type=EdgeType.CONFLICTS_WITH,
         source_label=NodeLabel.BUSINESS_RULE,
         source_key=rule_node.key_value,
-        target_label=NodeLabel.DATA_ENTITY,
+        target_label=NodeLabel.TABLE,
         target_key=entity_node.key_value,
-        properties={"resolved_by": "reviewer@example.com"},
+        properties={"status": "auto_resolved"},
     )
 
     writer.write_batch([rule_node, entity_node], [edge])
 
     with writer.driver.session(database=neo4j_config.database) as session:
         result = session.run(
-            "MATCH (r:BusinessRule {rule_id: $rule_id})-[c:CONFLICTS_WITH]->(e:DataEntity {entity_name: $entity_id}) "
-            "RETURN r.description AS description, c.resolved_by AS resolved_by, r.last_verified AS last_verified",
+            "MATCH (r:BusinessRule {rule_id: $rule_id})-[c:CONFLICTS_WITH]->(e:Table {table_id: $entity_id}) "
+            "RETURN r.description AS description, c.status AS status, r.last_verified AS last_verified",
             rule_id=rule_node.key_value,
             entity_id=entity_node.key_value,
         )
@@ -64,7 +64,7 @@ def test_write_batch_merges_nodes_and_edges(writer: Neo4jWriter, neo4j_config):
 
     assert record is not None
     assert record["description"] == "test rule"
-    assert record["resolved_by"] == "reviewer@example.com"
+    assert record["status"] == "auto_resolved"
     assert record["last_verified"] is not None
 
 
@@ -87,3 +87,22 @@ def test_write_batch_is_idempotent_via_merge(writer: Neo4jWriter, neo4j_config):
 
     assert record["c"] == 1  # MERGE, not CREATE -- no duplicate node
     assert record["description"] == "v2"  # properties updated in place
+
+
+def test_write_batch_stamps_repo_id_on_every_node(writer: Neo4jWriter, neo4j_config):
+    """Regression test: without this, a cross-run reader (atlaz.docgen) has
+    no way to scope a query to one ingested repo, and silently blends every
+    repo ever written to this shared Neo4j instance together."""
+    node = GraphNode(
+        label=NodeLabel.BUSINESS_RULE,
+        key_value=f"{TEST_PREFIX}::rule3",
+        properties={"description": "v1", "literal_value": "1", "tier": "extractable", "confidence": 1.0},
+    )
+    writer.write_batch([node], [], repo_id="pytest-repo-scoping-check")
+
+    with writer.driver.session(database=neo4j_config.database) as session:
+        record = session.run(
+            "MATCH (r:BusinessRule {rule_id: $rule_id}) RETURN r.repo_id AS repo_id", rule_id=node.key_value
+        ).single()
+
+    assert record["repo_id"] == "pytest-repo-scoping-check"

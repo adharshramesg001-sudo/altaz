@@ -2,7 +2,7 @@
 
 Every agent that needs LLM synthesis depends only on this Protocol, never on
 a provider SDK directly. Provider selection is a config value
-(`LLM_PROVIDER=anthropic|openai|custom|mock`), not a code dependency -- this
+(`LLM_PROVIDER=anthropic|openai|azure|custom|mock`), not a code dependency -- this
 is what lets the same agent code run against a real model in production and
 a deterministic mock in tests/CI.
 """
@@ -181,14 +181,68 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
         return response.choices[0].message.content or ""
 
 
+class AzureOpenAILLMClient(BaseLLMClient):
+    """Wrapper for Azure OpenAI's Chat Completions API. Uses the deployment
+    name (not the base model name) as `model`, per Azure's API shape."""
+
+    def __init__(self, config: LLMConfig) -> None:
+        self.config = config
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            try:
+                import openai
+            except ImportError as exc:  # pragma: no cover
+                raise LLMError(
+                    "openai package is not installed; run `pip install openai` "
+                    "or set LLM_PROVIDER=mock"
+                ) from exc
+            if not self.config.azure_endpoint:
+                raise LLMError("AZURE_OPENAI_ENDPOINT is required when LLM_PROVIDER=azure")
+            self._client = openai.AzureOpenAI(
+                api_key=self.config.api_key,
+                azure_endpoint=self.config.azure_endpoint,
+                api_version=self.config.azure_api_version or "2024-12-01-preview",
+            )
+        return self._client
+
+    def complete(self, prompt: str, schema: dict | None = None) -> str:
+        client = self._get_client()
+        deployment = self.config.azure_deployment or self.config.model
+        messages = [{"role": "user", "content": prompt}]
+        if schema is not None:
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": (
+                        "Respond with ONLY a single JSON object matching this schema, "
+                        f"no prose, no markdown fences: {json.dumps(schema)}"
+                    ),
+                },
+            )
+        try:
+            response = client.chat.completions.create(
+                model=deployment,
+                messages=messages,
+                timeout=self.config.timeout_seconds,
+            )
+        except Exception as exc:
+            raise LLMError(f"Azure OpenAI completion failed: {exc}") from exc
+        return response.choices[0].message.content or ""
+
+
 def build_llm_client(config: LLMConfig | None = None) -> BaseLLMClient:
     """Factory selecting the concrete `LLMClient` from config alone."""
     config = config or LLMConfig()
-    provider = config.provider.lower()
+    provider = config.provider.lower().strip()
     if provider == "anthropic":
         return AnthropicLLMClient(config)
     if provider in {"openai", "custom"}:
         return OpenAICompatibleLLMClient(config)
+    if provider == "azure":
+        return AzureOpenAILLMClient(config)
     if provider == "mock":
         return MockLLMClient(config)
     raise ValueError(f"Unknown LLM_PROVIDER: {config.provider!r}")

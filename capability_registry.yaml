@@ -1,0 +1,29 @@
+# Capability registry (LLD Section 6.1).
+#
+# Loaded once per run by `atlaz.orchestration.capability_registry`, and
+# validated against the LangGraph nodes actually registered in
+# `atlaz.orchestration.graph.build_state_graph` at compile time: an agent
+# marked `true` here with no corresponding node registered is a hard
+# startup failure, not a silent skip. `domain_orchestrator` only ever
+# fans out (`Send()`) to agents whose registry entry is `true`.
+domain_a:
+  readme_commit_signal_miner: true
+  gap_detector: true
+domain_b:
+  capability_clustering: true
+  business_rule_extraction: true
+  domain_glossary_builder: true
+  brd_extraction: false        # architecture only -- not built this cycle
+domain_c:
+  frd_extraction: true
+  prd_inference: false         # architecture only -- not built this cycle
+domain_d:
+  hld_builder: true
+  lld_parser: true
+  data_model_extractor: true
+  api_contract_parser: true
+  security_control_scanner: true
+domain_e:
+  infra_iac_parser: false
+  test_coverage_analyzer: false
+  git_pr_history_miner: false

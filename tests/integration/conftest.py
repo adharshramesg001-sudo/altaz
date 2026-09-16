@@ -1,6 +1,6 @@
 import pytest
 
-from atlaz.shared.config import Neo4jConfig
+from atlaz.shared.config import DatabaseConfig, Neo4jConfig
 
 
 @pytest.fixture(scope="session")
@@ -20,3 +20,25 @@ def require_neo4j(neo4j_config: Neo4jConfig):
         pytest.skip(f"Neo4j is not reachable at {neo4j_config.uri} -- run `docker compose up -d` first.")
     finally:
         driver.close()
+
+
+@pytest.fixture(scope="session")
+def database_config() -> DatabaseConfig:
+    return DatabaseConfig.from_env()  # defaults match `atlaz db init`
+
+
+@pytest.fixture(scope="session")
+def require_database(database_config: DatabaseConfig):
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import OperationalError
+
+    engine = create_engine(database_config.url)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except OperationalError:
+        pytest.skip(
+            f"Postgres audit database is not reachable at {database_config.url} -- run `atlaz db init` first."
+        )
+    finally:
+        engine.dispose()

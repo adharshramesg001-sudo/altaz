@@ -1,9 +1,12 @@
-"""Auto-Resolve Fallback Policy (LLD Section 10.3, `hitl_enabled = false`).
+"""Auto-Resolve Fallback Policy for the three-tier HITL gate (`hitl_enabled
+= false`) -- gap confirmations and low-confidence findings only. Cross-
+domain conflict auto-resolution is a separate policy now, see
+`atlaz.orchestration.dispute_resolution`.
 
 Turning HITL off removes the human step, not the honesty guarantee: this
-policy never picks a side on a conflict and never silently drops a
-low-confidence finding -- it writes everything, correctly labeled, so the
-reasoning layer can still tell the truth about what's uncertain.
+policy never silently drops a low-confidence finding -- it writes
+everything, correctly labeled, so the reasoning layer can still tell the
+truth about what's uncertain.
 """
 
 from __future__ import annotations
@@ -36,20 +39,6 @@ def auto_resolve(flagged: list[ReviewItem]) -> list[ReviewResolution]:
                     resolved_value=item.subject,
                     reviewer=AUTO_RESOLVE_REVIEWER,
                     resolution_note="accepted as-is; needs_review=true",
-                )
-            )
-        elif item.kind == ReviewItemKind.CONFLICT:
-            # Both sides written, linked by conflicts_with, with no side preferred.
-            # `resolved_value` still carries the ConflictCandidate (not None) so the
-            # graph writer can record both sides -- "no side preferred" describes the
-            # resolution note, not an absence of data to write.
-            resolved.append(
-                ReviewResolution(
-                    item_id=item.item_id,
-                    action=ReviewAction.RESOLVE_CONFLICT,
-                    resolved_value=item.subject,
-                    reviewer=AUTO_RESOLVE_REVIEWER,
-                    resolution_note="left unresolved -- no side preferred",
                 )
             )
     return resolved

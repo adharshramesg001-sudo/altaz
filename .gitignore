@@ -11,7 +11,9 @@ htmlcov/
 
 .env
 .atlaz/
+outputs/
 data/neo4j/
+data/redis/
 
 .idea/
 .vscode/

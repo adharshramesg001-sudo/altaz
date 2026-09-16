@@ -22,6 +22,18 @@ CONFIG_SUFFIXES = {".env", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg"}
 
 
 @dataclass(slots=True)
+class RepoMeta:
+    """LLD Section 3/14.2.1's `Repository` node fields -- the small,
+    graph-facing summary of a run's repo, distinct from the full
+    `RepoInventory` file listing every other ingestion-stage node still
+    needs."""
+
+    repo_id: str
+    name: str
+    primary_languages: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class FileRecord:
     path: str  # relative to repo root, POSIX separators
     language: str | None

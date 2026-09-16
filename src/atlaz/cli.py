@@ -1,18 +1,53 @@
 """CLI entry point (`atlaz` console script, per pyproject.toml).
 
 Commands:
+  atlaz app
+      Launches the Streamlit app -- two screens, Ingest and Retrieve &
+      Document. Runs everything in-process (no Celery/API required); the
+      three-tier HITL gate is always auto-resolved there, there is no
+      separate review screen.
   atlaz run <repo_path> [--thread-id ID]
       Ingests and extracts knowledge from a repository. If HITL is enabled
       and something was flagged, the run pauses and prints the thread id
-      needed to review it.
-  atlaz review <thread_id>
-      Launches the Streamlit review app pointed at a specific paused run.
+      needed to resolve it.
   atlaz resume <thread_id>
       Applies the auto-resolve policy and finishes a paused run without a
       human reviewer (equivalent to what happens automatically when
       HITL_ENABLED=false) -- useful for CI or a hands-off demo.
   atlaz ask <thread_id> "<question>" [--mode qa|enhancement|modernization|drift|product_synthesis]
       Runs one reasoning-layer query against the knowledge graph.
+  atlaz enhance <thread_id> "<request>" [--save]
+      Runs the retrieval + code-modification flow: finds files the
+      knowledge graph says are impacted by <request>, drafts modified
+      content for each, and (with --save) writes them to outputs/ --
+      never back into the ingested repo. CLI-only; not surfaced in the
+      Streamlit app.
+  atlaz document <thread_id> <project_id> [--no-save]
+      Generates a High-Level Design and Low-Level Design document from an
+      already-ingested run's knowledge graph -- deterministic facts
+      (services, classes, data model, API contracts, business rules,
+      security controls) rendered directly from the graph, plus one
+      LLM-synthesized executive summary. Saved to
+      outputs/<project_id>/docs/<timestamp>/{HLD,LLD}.md unless --no-save.
+  atlaz link-services <thread_id_a> <thread_id_b> [--write] [--min-confidence F]
+      Scans both already-ingested repos' source for every kind of evidence
+      one talks to the other, and correlates it against each repo's own
+      knowledge graph:
+        - synchronous: literal URLs, service-name-shaped env vars,
+          docker-compose/k8s declared service names -- written as
+          CALLS_SERVICE edges between the two repos' Service nodes.
+        - async messaging: message-queue/event-stream call sites (Kafka,
+          RabbitMQ, SQS, Azure Service Bus, Redis Streams, Google Pub/Sub)
+          -- written as PUBLISHES/CONSUMES edges from each repo's owning
+          Service to a shared Event node keyed by topic name (the two
+          repos land on the same node without needing to be matched to
+          each other explicitly).
+      Prints findings by default (dry run); --write persists them,
+      status="unconfirmed" -- heuristic, not HITL-reviewed yet.
+  atlaz db init
+      Creates the audit database (if missing), its schema, and runs Alembic
+      migrations. Run this once before the first `atlaz run`. Assumes an
+      editable/source checkout (resolves alembic.ini relative to this file).
 """
 
 from __future__ import annotations
@@ -28,6 +63,7 @@ from atlaz.orchestration.runner import resume_pipeline, run_pipeline
 from atlaz.reasoning.neo4j_query_runner import Neo4jReasoningStore
 from atlaz.reasoning.reasoning_agent import ReasoningAgent, ReasoningMode
 from atlaz.shared.config import PipelineConfig
+from atlaz.shared.logging_config import configure_logging
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -37,8 +73,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if result.status == "pending_review":
         print(f"Run paused for human review. thread_id = {result.thread_id}")
         print(f"  Flagged items: {len(result.pending_items or [])}")
-        print(f"  Review with:  atlaz review {result.thread_id}")
-        print(f"  Or auto-resolve without a reviewer:  atlaz resume {result.thread_id}")
+        print(f"  Auto-resolve and finish:  atlaz resume {result.thread_id}")
         return 0
 
     print(f"Run complete. thread_id = {result.thread_id}")
@@ -64,10 +99,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_review(args: argparse.Namespace) -> int:
-    app_path = Path(__file__).parent / "hitl" / "streamlit_app.py"
-    cmd = [sys.executable, "-m", "streamlit", "run", str(app_path), "--", "--thread-id", args.thread_id]
-    return subprocess.call(cmd)
+def _cmd_app(args: argparse.Namespace) -> int:
+    app_path = Path(__file__).parent / "webapp" / "main.py"
+    return subprocess.call([sys.executable, "-m", "streamlit", "run", str(app_path)])
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
@@ -88,6 +122,134 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_enhance(args: argparse.Namespace) -> int:
+    from atlaz.enhancement.guideline_store import (
+        GuidelineRetrievalAgent,
+        MilvusLiteVectorIndex,
+        default_embed_fn,
+    )
+    from atlaz.enhancement.impact_analysis import ImpactAnalysisAgent
+    from atlaz.enhancement.modifier import CodeModificationAgent
+    from atlaz.enhancement.service import EnhancementService
+
+    config = PipelineConfig.from_env()
+    llm_client = build_llm_client(config.llm)
+
+    guideline_agent = None
+    if config.guideline_store.enabled:
+        try:
+            index = MilvusLiteVectorIndex(config.guideline_store.db_path, config.guideline_store.collection_name)
+            guideline_agent = GuidelineRetrievalAgent(index, default_embed_fn(config.llm))
+            guideline_agent.populate_default_guidelines()
+        except RuntimeError as exc:
+            print(f"Guideline retrieval disabled: {exc}")
+
+    with Neo4jReasoningStore(config.neo4j) as store:
+        service = EnhancementService(
+            ImpactAnalysisAgent(store.run), CodeModificationAgent(llm_client), guideline_agent, output_root="outputs"
+        )
+        try:
+            result = service.run(args.thread_id, args.request)
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+
+    print(f"Impacted files: {len(result.impact.files)}")
+    for f in result.impact.files:
+        print(f"  - {f.file_path} ({f.reason})")
+    if result.skipped_files:
+        print(f"Skipped (not found on disk): {', '.join(result.skipped_files)}")
+    print(f"Modifications drafted: {len(result.modifications)}")
+
+    if args.save:
+        output_dir = service.save(result, args.request)
+        print(f"Saved to: {output_dir}")
+    return 0
+
+
+def _cmd_document(args: argparse.Namespace) -> int:
+    from atlaz.docgen.service import DocumentationService
+
+    config = PipelineConfig.from_env()
+    llm_client = build_llm_client(config.llm)
+
+    with Neo4jReasoningStore(config.neo4j) as store:
+        service = DocumentationService(llm_client, store.run, output_root="outputs")
+        try:
+            result = service.run(args.thread_id, args.project_id, save=not args.no_save)
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+
+    print(f"HLD: {len(result.hld_markdown.splitlines())} line(s)")
+    print(f"LLD: {len(result.lld_markdown.splitlines())} line(s)")
+    if result.output_dir:
+        print(f"Saved to: {result.output_dir}")
+    return 0
+
+
+def _cmd_link_services(args: argparse.Namespace) -> int:
+    """Detects both how repo A and repo B call each other synchronously
+    (CALLS_SERVICE, via `CrossRepoLinkService`) and how each publishes/
+    consumes messages asynchronously (PUBLISHES/CONSUMES onto a shared
+    Event node, via `PubSubLinkService`) -- one command, since both are
+    just different evidence for the same question ("how are these two
+    repos coupled?"), not two things a user should have to remember to run
+    separately."""
+    from atlaz.crossrepo.pubsub_service import PubSubLinkService
+    from atlaz.crossrepo.service import CrossRepoLinkService
+
+    config = PipelineConfig.from_env()
+
+    with Neo4jReasoningStore(config.neo4j) as store:
+        sync_service = CrossRepoLinkService(store.run)
+        pubsub_service = PubSubLinkService(store.run)
+        try:
+            candidates = sync_service.find_candidates(args.thread_id_a, args.thread_id_b)
+            findings = pubsub_service.scan(args.thread_id_a) + pubsub_service.scan(args.thread_id_b)
+        except ValueError as exc:
+            print(str(exc))
+            return 1
+
+        candidates = [c for c in candidates if c.confidence >= args.min_confidence]
+        candidates.sort(key=lambda c: c.confidence, reverse=True)
+        findings = [f for f in findings if f.confidence >= args.min_confidence]
+        findings.sort(key=lambda f: f.confidence, reverse=True)
+
+        if not candidates and not findings:
+            print("No cross-repo service links found.")
+            return 0
+
+        for c in candidates:
+            evidence = c.evidence[0] if c.evidence else None
+            location = f"{evidence.file}:{evidence.line}" if evidence else "?"
+            print(
+                f"[sync]  {c.source_repo_id}:{c.source_service} -> {c.target_repo_id}:{c.target_service} "
+                f"(confidence={c.confidence:.2f}, matched_on={c.matched_on}, evidence={location})"
+            )
+        for f in findings:
+            location = f"{f.evidence.file}:{f.evidence.line}"
+            print(
+                f"[async] {f.repo_id}:{f.service} {f.direction} '{f.topic}' via {f.library} "
+                f"(confidence={f.confidence:.2f}, evidence={location})"
+            )
+
+        if args.write:
+            written_sync = sync_service.write(candidates)
+            written_async = pubsub_service.write(findings)
+            print(f"Wrote {written_sync} CALLS_SERVICE edge(s), {written_async} PUBLISHES/CONSUMES edge(s).")
+        else:
+            print("Dry run -- re-run with --write to persist these as graph edges.")
+    return 0
+
+
+def _cmd_db_init(args: argparse.Namespace) -> int:
+    from atlaz.audit.migrate import migrate
+
+    migrate()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="atlaz", description="AtlaZ codebase knowledge extraction framework")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -101,9 +263,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("thread_id")
     resume_parser.set_defaults(func=_cmd_resume)
 
-    review_parser = subparsers.add_parser("review", help="Launch the Streamlit HITL review app for a paused run")
-    review_parser.add_argument("thread_id")
-    review_parser.set_defaults(func=_cmd_review)
+    app_parser = subparsers.add_parser("app", help="Launch the Streamlit app (Ingest + Retrieve & Document)")
+    app_parser.set_defaults(func=_cmd_app)
 
     ask_parser = subparsers.add_parser("ask", help="Ask the reasoning layer a question")
     ask_parser.add_argument("question")
@@ -112,10 +273,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_parser.set_defaults(func=_cmd_ask)
 
+    enhance_parser = subparsers.add_parser(
+        "enhance", help="Find impacted files and draft modifications for a change request"
+    )
+    enhance_parser.add_argument("thread_id")
+    enhance_parser.add_argument("request")
+    enhance_parser.add_argument("--save", action="store_true", help="Write results to outputs/")
+    enhance_parser.set_defaults(func=_cmd_enhance)
+
+    document_parser = subparsers.add_parser(
+        "document", help="Generate an HLD/LLD document pair from an already-ingested run's knowledge graph"
+    )
+    document_parser.add_argument("thread_id")
+    document_parser.add_argument("project_id")
+    document_parser.add_argument("--no-save", action="store_true", help="Print lengths only; don't write to outputs/")
+    document_parser.set_defaults(func=_cmd_document)
+
+    link_services_parser = subparsers.add_parser(
+        "link-services",
+        help="Find (and optionally persist) cross-repo service links between two ingested runs -- "
+        "both synchronous (CALLS_SERVICE) and async messaging (PUBLISHES/CONSUMES)",
+    )
+    link_services_parser.add_argument("thread_id_a")
+    link_services_parser.add_argument("thread_id_b")
+    link_services_parser.add_argument("--write", action="store_true", help="Persist findings as graph edges")
+    link_services_parser.add_argument("--min-confidence", type=float, default=0.5)
+    link_services_parser.set_defaults(func=_cmd_link_services)
+
+    db_parser = subparsers.add_parser("db", help="Audit database management")
+    db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
+    db_init_parser = db_subparsers.add_parser("init", help="Create the database/schema and run migrations")
+    db_init_parser.set_defaults(func=_cmd_db_init)
+
     return parser
 
 
 def main() -> None:
+    configure_logging()
     parser = build_parser()
     args = parser.parse_args()
     sys.exit(args.func(args))
