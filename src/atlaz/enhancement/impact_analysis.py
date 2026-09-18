@@ -17,12 +17,12 @@ instead of a fresh per-request repo scan.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from atlaz.enhancement.models import ImpactAnalysisResult, ImpactedFile
 from atlaz.reasoning.cypher_safety import ensure_read_only
+from atlaz.shared.keyword_match import tokenize
 
 QueryRunner = Callable[[str, dict], list[dict]]
 
@@ -44,17 +44,6 @@ WHERE cap.name IN $capability_names
 MATCH (svc)-[:DEPENDS_ON]->(dep:Service)<-[:IMPLEMENTED_BY]-(:Feature)<-[:HAS_FEATURE]-(dcap:BusinessCapability)
 RETURN DISTINCT dcap.name AS capability_name, dcap.member_modules AS member_modules
 """
-
-_STOPWORDS = {
-    "the", "a", "an", "to", "of", "for", "and", "or", "in", "on", "with",
-    "add", "new", "please", "should", "want", "need", "make", "so", "that",
-    "this", "it", "be", "is", "are", "we", "our", "support", "feature",
-}
-
-
-def _tokenize(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9_]+", text.lower()) if w not in _STOPWORDS and len(w) > 2}
-
 
 def _searchable_text(record: dict) -> str:
     parts = [
@@ -96,12 +85,12 @@ class ImpactAnalysisAgent:
         self.query_runner = query_runner
 
     def run(self, enhancement_request: str, limit: int = 15) -> ImpactAnalysisResult:
-        request_tokens = _tokenize(enhancement_request)
+        request_tokens = tokenize(enhancement_request)
         records = self.query_runner(ensure_read_only(_CANDIDATE_QUERY), {})
 
         scored: list[_ScoredNode] = []
         for record in records:
-            overlap = len(request_tokens & _tokenize(_searchable_text(record)))
+            overlap = len(request_tokens & tokenize(_searchable_text(record)))
             if overlap > 0:
                 scored.append(_ScoredNode(record, overlap))
         scored.sort(key=lambda s: s.score, reverse=True)

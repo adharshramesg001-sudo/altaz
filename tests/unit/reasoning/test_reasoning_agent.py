@@ -35,7 +35,7 @@ def test_drift_mode_uses_dedicated_query_not_llm_generated_cypher():
     llm = ScriptedLLMClient([{"answer_text": "The rule and the plan disagree on the late fee rate.", "confidence": 0.9}])
     agent = ReasoningAgent(llm, fake_runner)
 
-    result = agent.answer("Where does intent diverge from implementation?", ReasoningMode.DRIFT)
+    result = agent.answer("Where does intent diverge from implementation?", ReasoningMode.DRIFT, "test-repo")
 
     assert len(queries_run) == 1
     assert "CONFLICTS_WITH" in queries_run[0]
@@ -56,7 +56,7 @@ def test_qa_mode_generates_cypher_then_synthesizes_answer():
     )
     agent = ReasoningAgent(llm, fake_runner)
 
-    result = agent.answer("What business rules exist?", ReasoningMode.QA)
+    result = agent.answer("What business rules exist?", ReasoningMode.QA, "test-repo")
 
     assert result.answer_text == "There is one business rule: cfg::max_retries."
     assert "cfg::max_retries" in result.cited_nodes
@@ -72,7 +72,7 @@ def test_unsafe_generated_cypher_is_never_executed():
     llm = ScriptedLLMClient([{"cypher": "MATCH (n) DETACH DELETE n"}])
     agent = ReasoningAgent(llm, fake_runner)
 
-    result = agent.answer("Delete everything?", ReasoningMode.QA)
+    result = agent.answer("Delete everything?", ReasoningMode.QA, "test-repo")
 
     assert calls == []  # the unsafe query never reached the runner
     assert result.confidence == 0.0
@@ -90,7 +90,7 @@ def test_unbuilt_corner_question_surfaces_a_gap_without_fabricating():
     )
     agent = ReasoningAgent(llm, fake_runner)
 
-    result = agent.answer("What does the BRD say about approval workflows?", ReasoningMode.QA)
+    result = agent.answer("What does the BRD say about approval workflows?", ReasoningMode.QA, "test-repo")
 
     assert any("Business Requirements" in g for g in result.gaps_encountered)
 
@@ -105,7 +105,7 @@ def test_product_synthesis_uses_dedicated_query():
     llm = ScriptedLLMClient([{"answer_text": "This product manages orders.", "confidence": 0.7}])
     agent = ReasoningAgent(llm, fake_runner)
 
-    result = agent.answer("What does this product do?", ReasoningMode.PRODUCT_SYNTHESIS)
+    result = agent.answer("What does this product do?", ReasoningMode.PRODUCT_SYNTHESIS, "test-repo")
 
     assert "Capability" in queries_run[0]
     assert result.answer_text == "This product manages orders."

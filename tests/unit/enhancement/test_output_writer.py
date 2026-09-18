@@ -1,6 +1,14 @@
 import json
 
-from atlaz.enhancement.models import FileModification, ImpactAnalysisResult, ImpactedFile, RetrievedGuideline
+from atlaz.enhancement.models import (
+    FileModification,
+    FileValidation,
+    ImpactAnalysisResult,
+    ImpactedFile,
+    ModificationPlan,
+    ModificationTask,
+    RetrievedGuideline,
+)
 from atlaz.enhancement.output_writer import write_modifications
 
 
@@ -55,3 +63,26 @@ def test_write_modifications_never_touches_the_source_repo(tmp_path):
     write_modifications(output_root, "thread-1", "req", impact, [], modifications)
 
     assert original_file.read_text() == "def checkout():\n    pass\n"
+
+
+def test_write_modifications_includes_plan_and_validations(tmp_path):
+    impact = ImpactAnalysisResult(matched_nodes=[], files=[ImpactedFile(file_path="a.py", reason="matches")])
+    modifications = [
+        FileModification(file_path="a.py", original_content="x = 1\n", modified_content="x = 2\n", task_description="t")
+    ]
+    plan = ModificationPlan(
+        summary="Bump the constant.", tasks=[ModificationTask(file_path="a.py", title="Bump", description="Set x=2")]
+    )
+    validations = [FileValidation(file_path="a.py", syntax_valid=True, warnings=[], security_issues=["possible leak"])]
+
+    output_dir = write_modifications(tmp_path, "thread-1", "req", impact, [], modifications, plan, validations)
+
+    manifest = json.loads((output_dir / "manifest.json").read_text())
+    assert manifest["plan_summary"] == "Bump the constant."
+    assert manifest["plan_tasks"][0]["file_path"] == "a.py"
+    assert manifest["validations"][0]["security_issues"] == ["possible leak"]
+
+    report = (output_dir / "report.md").read_text()
+    assert "Bump the constant." in report
+    assert "flagged on review" in report
+    assert "possible leak" in report

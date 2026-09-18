@@ -38,8 +38,9 @@ def render() -> None:
         "📥 Ingest a repository",
         "STEP 1",
         "Point AtlaZ at a local folder or a git repository URL. It reads the code and builds an "
-        "evidence-grounded knowledge graph -- once it's done, use **Retrieve & Document** to ask "
-        "questions or generate design docs.",
+        "evidence-grounded knowledge graph -- once it's done, pick the project below to ask "
+        "questions, generate design docs, or modernize it.",
+        anchor_id="ingest",
     )
 
     source = st.text_input(
@@ -103,7 +104,7 @@ def _render_result(result: PipelineRunResult) -> None:
     for column, (title, label, tone) in zip(columns[2:], _SUMMARY_LABELS, strict=True):
         style.stat_card(column, counts.get(label, 0), title, tone)
 
-    st.info("Head to **Retrieve & Document** in the sidebar to ask questions or generate design docs for this project.")
+    st.info("Scroll down to **Project** to pick it, then use **Retrieve & Document** or **Modernize** below.")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ def seeded_conflict(neo4j_config, require_neo4j):
                 properties={"rule_value": "0.05", "table_value": "0.045", "status": "unresolved_written_both", "unresolved": True},
             )
         ],
+        repo_id=TEST_PREFIX,
     )
     yield rule_key, entity_key
     with writer.driver.session(database=neo4j_config.database) as session:
@@ -50,7 +51,7 @@ def test_drift_mode_reads_real_conflicts_with_edge(neo4j_config, seeded_conflict
     rule_key, entity_key = seeded_conflict
     with Neo4jReasoningStore(neo4j_config) as store:
         agent = ReasoningAgent(MockLLMClient(), store.run)
-        result = agent.answer("Where does intent diverge from implementation?", ReasoningMode.DRIFT)
+        result = agent.answer("Where does intent diverge from implementation?", ReasoningMode.DRIFT, TEST_PREFIX)
 
     assert rule_key in result.cited_nodes
     assert entity_key in result.cited_nodes

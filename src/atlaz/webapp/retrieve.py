@@ -24,6 +24,7 @@ from atlaz.reasoning.neo4j_query_runner import Neo4jReasoningStore
 from atlaz.reasoning.reasoning_agent import ReasoningAgent, ReasoningMode
 from atlaz.shared.config import PipelineConfig
 from atlaz.webapp import style
+from atlaz.webapp.project_picker import select_project
 
 _MODE_LABELS = {
     ReasoningMode.QA: "General question",
@@ -41,25 +42,36 @@ _EXAMPLE_PLACEHOLDERS = {
 }
 
 
-def render() -> None:
+def _heading() -> None:
     style.page_heading(
         "🔎 Retrieve & Document",
         "STEP 2",
         "Ask questions, review links AtlaZ inferred, and generate design docs for an ingested project.",
+        anchor_id="retrieve",
     )
 
+
+def render() -> None:
+    """Standalone entry point -- picks its own project. `main.py`'s
+    single-page layout calls `render_body()` instead, with a project already
+    chosen by the shared picker above this section."""
     try:
         runs = list_completed_runs()
     except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
+        _heading()
         st.error(f"Couldn't reach the audit database: {exc}")
         return
 
     if not runs:
-        st.info("No ingested projects yet. Go to **Ingest** in the sidebar to get started.")
+        _heading()
+        st.info("No ingested projects yet. Use **Ingest** above to get started.")
         return
 
-    run = _select_project(runs)
+    render_body(select_project(runs))
 
+
+def render_body(run: PipelineRun) -> None:
+    _heading()
     ask_tab, docs_tab, review_tab, gaps_tab = st.tabs(
         ["💬 Ask a question", "📄 HLD & LLD", "🔗 Review links", "❓ Open questions"]
     )
@@ -73,16 +85,6 @@ def render() -> None:
         _render_gaps(run)
 
 
-def _select_project(runs: list[PipelineRun]) -> PipelineRun:
-    labels = [f"{r.repo_id}  ·  {r.started_at:%Y-%m-%d %H:%M}" for r in runs]
-    selected_thread_id = st.session_state.get("selected_thread_id")
-    default_index = next((i for i, r in enumerate(runs) if r.thread_id == selected_thread_id), 0)
-    choice = st.selectbox("Project", labels, index=default_index)
-    run = runs[labels.index(choice)]
-    st.session_state["selected_thread_id"] = run.thread_id
-    return run
-
-
 def _render_ask(run: PipelineRun) -> None:
     mode = st.selectbox("What kind of question?", list(_MODE_LABELS), format_func=lambda m: _MODE_LABELS[m], key="ask_mode")
     question = st.text_area("Your question", placeholder=_EXAMPLE_PLACEHOLDERS[mode], key="ask_question")
@@ -94,7 +96,7 @@ def _render_ask(run: PipelineRun) -> None:
                 llm_client = build_llm_client(config.llm)
                 with Neo4jReasoningStore(config.neo4j) as store:
                     agent = ReasoningAgent(llm_client, store.run)
-                    answer = agent.answer(question, mode)
+                    answer = agent.answer(question, mode, run.repo_id)
             except Exception as exc:  # noqa: BLE001 - surfaced to the user, not a crash
                 st.error(f"Couldn't answer that: {exc}")
                 return

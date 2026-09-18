@@ -38,3 +38,24 @@ class FileModification:
     original_content: str
     modified_content: str
     task_description: str
+
+
+@dataclass(slots=True)
+class ModificationTask:
+    file_path: str
+    title: str
+    description: str
+
+
+@dataclass(slots=True)
+class ModificationPlan:
+    summary: str
+    tasks: list[ModificationTask] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class FileValidation:
+    file_path: str
+    syntax_valid: bool = True
+    warnings: list[str] = field(default_factory=list)
+    security_issues: list[str] = field(default_factory=list)

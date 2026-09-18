@@ -19,7 +19,13 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from atlaz.enhancement.models import FileModification, ImpactAnalysisResult, RetrievedGuideline
+from atlaz.enhancement.models import (
+    FileModification,
+    FileValidation,
+    ImpactAnalysisResult,
+    ModificationPlan,
+    RetrievedGuideline,
+)
 
 
 def write_modifications(
@@ -29,7 +35,10 @@ def write_modifications(
     impact: ImpactAnalysisResult,
     guidelines: list[RetrievedGuideline],
     modifications: list[FileModification],
+    plan: ModificationPlan | None = None,
+    validations: list[FileValidation] | None = None,
 ) -> Path:
+    validations = validations or []
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir = Path(output_root) / thread_id / "modifications" / timestamp
     files_dir = run_dir / "files"
@@ -47,10 +56,14 @@ def write_modifications(
         "impacted_files": [asdict(f) for f in impact.files],
         "guidelines_used": [asdict(g) for g in guidelines],
         "modified_files": [mod.file_path for mod in modifications],
+        "plan_summary": plan.summary if plan else None,
+        "plan_tasks": [asdict(t) for t in plan.tasks] if plan else [],
+        "validations": [asdict(v) for v in validations],
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     (run_dir / "report.md").write_text(
-        _render_report(thread_id, enhancement_request, impact, guidelines, modifications), encoding="utf-8"
+        _render_report(thread_id, enhancement_request, impact, guidelines, modifications, plan, validations),
+        encoding="utf-8",
     )
     return run_dir
 
@@ -61,6 +74,8 @@ def _render_report(
     impact: ImpactAnalysisResult,
     guidelines: list[RetrievedGuideline],
     modifications: list[FileModification],
+    plan: ModificationPlan | None,
+    validations: list[FileValidation],
 ) -> str:
     lines = [
         "# AtlaZ Enhancement Report",
@@ -82,12 +97,31 @@ def _render_report(
         for g in guidelines:
             lines.append(f"- **[{g.category}] {g.title}** (score {g.score:.3f}): {g.content}")
 
+    if plan:
+        lines += ["", "## Modernization plan", "", plan.summary]
+        if plan.tasks:
+            lines += ["", "**Tasks:**", ""]
+            for task in plan.tasks:
+                lines.append(f"- `{task.file_path}` — **{task.title}**: {task.description}")
+
+    validation_by_file = {v.file_path: v for v in validations}
     lines += ["", "## Modifications", ""]
     if not modifications:
         lines.append("_No modifications were generated._")
     for mod in modifications:
-        lines.append(f"### `{mod.file_path}`")
+        validation = validation_by_file.get(mod.file_path)
+        status = "✅ passed checks"
+        if validation and (not validation.syntax_valid or validation.security_issues):
+            status = "⚠️ flagged on review"
+        lines.append(f"### `{mod.file_path}` — {status}")
         lines.append("")
+        if validation:
+            for warning in validation.warnings:
+                lines.append(f"- ⚠️ {warning}")
+            for issue in validation.security_issues:
+                lines.append(f"- 🔒 {issue}")
+            if validation.warnings or validation.security_issues:
+                lines.append("")
         diff = difflib.unified_diff(
             mod.original_content.splitlines(keepends=True),
             mod.modified_content.splitlines(keepends=True),

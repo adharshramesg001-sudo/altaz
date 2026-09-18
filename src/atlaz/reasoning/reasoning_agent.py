@@ -82,6 +82,7 @@ class AnsweredQuery:
 
 _DRIFT_QUERY = """
 MATCH (rule:BusinessRule)-[c:CONFLICTS_WITH]->(impl:Table)
+WHERE rule.repo_id = $repo_id
 RETURN rule.rule_id AS rule_id, rule.literal_value AS rule_value,
        labels(impl) AS impl_labels, impl.name AS entity_name,
        c.field_name AS field_name, c.rule_value AS conflict_rule_value,
@@ -91,10 +92,13 @@ RETURN rule.rule_id AS rule_id, rule.literal_value AS rule_value,
 
 _PRODUCT_SYNTHESIS_QUERY = """
 MATCH (cap:BusinessCapability)
+WHERE cap.repo_id = $repo_id
 OPTIONAL MATCH (cap)-[:HAS_FEATURE]->(feat:Feature)-[:IMPLEMENTED_BY]->(svc:Service)
 OPTIONAL MATCH (svc)-[:OWNS]->(table:Table)
 OPTIONAL MATCH (mod:File)-[:IMPLEMENTS]->(req:Requirement)
+WHERE mod.repo_id = $repo_id
 OPTIONAL MATCH (term:DomainConcept)
+WHERE term.repo_id = $repo_id
 RETURN cap.name AS capability, collect(DISTINCT svc.name) AS services,
        collect(DISTINCT table.name) AS tables,
        collect(DISTINCT req.inferred_behavior) AS requirements,
@@ -107,15 +111,15 @@ class ReasoningAgent:
         self.llm_client = llm_client
         self.query_runner = query_runner
 
-    def answer(self, question: str, mode: ReasoningMode) -> AnsweredQuery:
+    def answer(self, question: str, mode: ReasoningMode, repo_id: str) -> AnsweredQuery:
         gaps_encountered = self._gaps_mentioned_in(question)
 
         if mode == ReasoningMode.DRIFT:
-            records = self.query_runner(_DRIFT_QUERY, {})
+            records = self.query_runner(_DRIFT_QUERY, {"repo_id": repo_id})
         elif mode == ReasoningMode.PRODUCT_SYNTHESIS:
-            records = self.query_runner(_PRODUCT_SYNTHESIS_QUERY, {})
+            records = self.query_runner(_PRODUCT_SYNTHESIS_QUERY, {"repo_id": repo_id})
         else:
-            records = self._run_generated_query(question, mode)
+            records = self._run_generated_query(question, mode, repo_id)
 
         return self._synthesize(question, mode, records, gaps_encountered)
 
@@ -123,13 +127,18 @@ class ReasoningAgent:
         lowered = question.lower()
         return [note for key, note in UNBUILT_CORNERS.items() if key in lowered]
 
-    def _run_generated_query(self, question: str, mode: ReasoningMode) -> list[dict]:
+    def _run_generated_query(self, question: str, mode: ReasoningMode, repo_id: str) -> list[dict]:
         prompt = (
             f"Knowledge graph schema:\n{_SCHEMA_SUMMARY}\n\n"
             f"Question ({mode.value} mode): {question}\n\n"
             "Write a single read-only Cypher query (MATCH/OPTIONAL MATCH/WITH/UNWIND/RETURN only, "
             "no CREATE/MERGE/DELETE/SET/CALL) that retrieves the graph data needed to answer this "
-            "question, using only the labels/properties/relationship types listed above."
+            "question, using only the labels/properties/relationship types listed above.\n\n"
+            f"IMPORTANT: this Neo4j database holds multiple ingested repositories side by side. "
+            f"This question is about exactly one of them, repo_id = '{repo_id}'. Every node label "
+            f"above carries a `repo_id` property. Your query MUST add a `repo_id = '{repo_id}'` "
+            "filter (via WHERE, inline in the MATCH pattern, or both) on every node variable you "
+            "match, so it never reads another repository's data."
         )
         result = self.llm_client.complete_json(prompt, schema=_CYPHER_SCHEMA)
         cypher = result.get("cypher", "")
@@ -138,7 +147,7 @@ class ReasoningAgent:
         except UnsafeCypherError:
             return []  # treated as "no data retrieved" -- surfaces as a low-confidence answer, never executed
         try:
-            return self.query_runner(safe_cypher, {})
+            return self.query_runner(safe_cypher, {"repo_id": repo_id})
         except Exception:  # noqa: BLE001 - a malformed but "safe-looking" query must not crash the caller
             return []
 

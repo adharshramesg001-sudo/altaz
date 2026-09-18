@@ -1,7 +1,8 @@
 """Orchestrates one enhancement request end to end against an already
 ingested run: resolve the run's `repo_path` -> impact analysis over the
-knowledge graph -> guideline retrieval -> per-file code modification ->
-(on request) write results to `outputs/`.
+knowledge graph -> guideline retrieval -> modernization planning -> per-file
+code modification -> deterministic validation -> (on request) write results
+to `outputs/`.
 
 Deliberately not a LangGraph state graph like the ingestion pipeline in
 `atlaz.orchestration`: this flow is a single linear pass with no HITL
@@ -18,9 +19,17 @@ from pathlib import Path
 from atlaz.audit.repository import get_run
 from atlaz.enhancement.guideline_store import GuidelineRetrievalAgent
 from atlaz.enhancement.impact_analysis import ImpactAnalysisAgent
-from atlaz.enhancement.models import FileModification, ImpactAnalysisResult, RetrievedGuideline
+from atlaz.enhancement.models import (
+    FileModification,
+    FileValidation,
+    ImpactAnalysisResult,
+    ModificationPlan,
+    RetrievedGuideline,
+)
 from atlaz.enhancement.modifier import CodeModificationAgent
 from atlaz.enhancement.output_writer import write_modifications
+from atlaz.enhancement.planner import PlanningAgent
+from atlaz.enhancement.validator import ValidationAgent
 from atlaz.shared.config import DatabaseConfig
 
 
@@ -31,6 +40,8 @@ class EnhancementResult:
     impact: ImpactAnalysisResult
     guidelines: list[RetrievedGuideline]
     modifications: list[FileModification]
+    plan: ModificationPlan | None = None
+    validations: list[FileValidation] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
     output_dir: Path | None = None
 
@@ -41,12 +52,16 @@ class EnhancementService:
         impact_agent: ImpactAnalysisAgent,
         modifier: CodeModificationAgent,
         guideline_agent: GuidelineRetrievalAgent | None = None,
+        planning_agent: PlanningAgent | None = None,
+        validation_agent: ValidationAgent | None = None,
         output_root: Path | str = "outputs",
         database_config: DatabaseConfig | None = None,
     ) -> None:
         self.impact_agent = impact_agent
         self.modifier = modifier
         self.guideline_agent = guideline_agent
+        self.planning_agent = planning_agent
+        self.validation_agent = validation_agent or ValidationAgent()
         self.output_root = output_root
         self.database_config = database_config
 
@@ -64,13 +79,25 @@ class EnhancementService:
         guidelines = self.guideline_agent.query(enhancement_request) if self.guideline_agent else []
         return repo_path, impact, guidelines
 
+    def plan(
+        self,
+        enhancement_request: str,
+        impact: ImpactAnalysisResult,
+        guidelines: list[RetrievedGuideline],
+    ) -> ModificationPlan | None:
+        if self.planning_agent is None:
+            return None
+        return self.planning_agent.run(enhancement_request, impact, guidelines)
+
     def generate(
         self,
         repo_path: str,
         enhancement_request: str,
         impact: ImpactAnalysisResult,
         guidelines: list[RetrievedGuideline],
+        plan: ModificationPlan | None = None,
     ) -> tuple[list[FileModification], list[str]]:
+        task_by_file = {task.file_path: task for task in (plan.tasks if plan else [])}
         modifications: list[FileModification] = []
         skipped: list[str] = []
         for impacted in impact.files:
@@ -79,19 +106,30 @@ class EnhancementService:
                 skipped.append(impacted.file_path)
                 continue
             content = full_path.read_text(encoding="utf-8", errors="ignore")
-            task_description = f"{enhancement_request}\n\n(Relevance: {impacted.reason})"
+            task = task_by_file.get(impacted.file_path)
+            if task:
+                task_description = f"{task.title}\n\n{task.description}\n\n(Relevance: {impacted.reason})"
+            else:
+                task_description = f"{enhancement_request}\n\n(Relevance: {impacted.reason})"
             modifications.append(self.modifier.run(impacted.file_path, content, task_description, guidelines))
         return modifications, skipped
 
+    def validate(self, modifications: list[FileModification]) -> list[FileValidation]:
+        return self.validation_agent.run(modifications)
+
     def run(self, thread_id: str, enhancement_request: str) -> EnhancementResult:
         repo_path, impact, guidelines = self.analyze(thread_id, enhancement_request)
-        modifications, skipped = self.generate(repo_path, enhancement_request, impact, guidelines)
+        plan = self.plan(enhancement_request, impact, guidelines)
+        modifications, skipped = self.generate(repo_path, enhancement_request, impact, guidelines, plan)
+        validations = self.validate(modifications)
         return EnhancementResult(
             thread_id=thread_id,
             repo_path=repo_path,
             impact=impact,
             guidelines=guidelines,
             modifications=modifications,
+            plan=plan,
+            validations=validations,
             skipped_files=skipped,
         )
 
@@ -103,6 +141,8 @@ class EnhancementService:
             result.impact,
             result.guidelines,
             result.modifications,
+            result.plan,
+            result.validations,
         )
         result.output_dir = output_dir
         return output_dir
