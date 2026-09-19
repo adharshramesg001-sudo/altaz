@@ -22,6 +22,15 @@ ORM_DECORATOR_PATTERNS = {"Entity", "entity"}
 FOREIGN_KEY_CALL_PATTERN = re.compile(r"\b(ForeignKey|relationship|ManyToOne|OneToMany|ManyToMany)\s*\(")
 FOREIGN_KEY_TARGET_PATTERN = re.compile(r"""["']([A-Za-z_][\w\.]*)["']""")
 
+# Required/optional heuristics -- pattern matching over the annotation text
+# and the raw right-hand-side expression, not a real type-system evaluation.
+# Covers the common conventions across the ORM/decorator patterns already
+# recognized above (SQLAlchemy `nullable=`, Django `null=`/`blank=`,
+# Pydantic `Field(...)` ellipsis-required, plain literal/`None` defaults).
+_OPTIONAL_ANNOTATION_PATTERN = re.compile(r"Optional\[|(?:^|[\s\[])None(?:\s*\||\s*\]|\s*$)")
+_NULLABLE_KWARG_PATTERN = re.compile(r"\b(?:nullable|null|blank)\s*=\s*(True|False)")
+_REQUIRED_ELLIPSIS_PATTERN = re.compile(r"\bField\s*\(\s*\.\.\.")
+
 _CREATE_TABLE = re.compile(r"CREATE\s+TABLE\s+(?:IF NOT EXISTS\s+)?[`\"\[]?(\w+)[`\"\]]?\s*\(", re.IGNORECASE)
 _ALTER_TABLE = re.compile(r"ALTER\s+TABLE\s+[`\"\[]?(\w+)[`\"\]]?", re.IGNORECASE)
 _COLUMN_LINE = re.compile(r"^\s*[`\"\[]?(\w+)[`\"\]]?\s+([A-Za-z][\w()]*)", re.MULTILINE)
@@ -43,6 +52,7 @@ class FieldInfo:
     field_type: str | None = None
     constraints: list[str] = field(default_factory=list)
     default_value: str | None = None  # plain literal default, when the field's value_expr is one (not a call)
+    required: bool = True  # best-effort heuristic -- see _infer_required()
 
 
 @dataclass(slots=True)
@@ -170,9 +180,33 @@ def _fields_and_relationships(entity_name: str, raw_fields) -> tuple[list[FieldI
             field_type = field_type or kind_raw
 
         fields.append(
-            FieldInfo(name=raw.name, field_type=field_type, constraints=constraints, default_value=default_value)
+            FieldInfo(
+                name=raw.name,
+                field_type=field_type,
+                constraints=constraints,
+                default_value=default_value,
+                required=_infer_required(field_type, raw.value_expr, default_value),
+            )
         )
     return fields, relationships
+
+
+def _infer_required(field_type: str | None, value_expr: str | None, default_value: str | None) -> bool:
+    """Best-effort required/optional heuristic (see module docstring for the
+    patterns it covers). Defaults to True (required) when nothing says
+    otherwise -- matching how a bare `name: str` field with no default
+    behaves in Pydantic/dataclasses."""
+    if field_type and _OPTIONAL_ANNOTATION_PATTERN.search(field_type):
+        return False
+    if value_expr:
+        nullable_match = _NULLABLE_KWARG_PATTERN.search(value_expr)
+        if nullable_match:
+            return nullable_match.group(1) == "False"
+        if _REQUIRED_ELLIPSIS_PATTERN.search(value_expr):
+            return True
+        if value_expr.strip() == "None":
+            return False
+    return default_value is None
 
 
 _PLAIN_LITERAL_PATTERN = re.compile(r"^(\"[^\"]*\"|'[^']*'|-?\d+(?:\.\d+)?)$")
@@ -202,11 +236,14 @@ def _find_matching_paren(content: str, open_paren_index: int) -> int | None:
 def _parse_sql_columns(body: str) -> list[FieldInfo]:
     fields = []
     for line in body.split(","):
-        match = _COLUMN_LINE.match(line.strip())
+        stripped_line = line.strip()
+        match = _COLUMN_LINE.match(stripped_line)
         if not match:
             continue
         name, col_type = match.group(1), match.group(2)
         if name.lower() in _SQL_KEYWORDS:
             continue
-        fields.append(FieldInfo(name=name, field_type=col_type))
+        upper_line = stripped_line.upper()
+        required = "NOT NULL" in upper_line or "PRIMARY KEY" in upper_line
+        fields.append(FieldInfo(name=name, field_type=col_type, required=required))
     return fields

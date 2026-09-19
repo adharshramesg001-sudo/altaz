@@ -665,11 +665,16 @@ def build_graph_batch(state, confidence_threshold: float) -> tuple[list[GraphNod
     nodes.extend(service_nodes)
     edges.extend(service_edges)
 
-    class_nodes, method_nodes = graph_builder.build_class_and_method_nodes(symbol_table, domain_d.get("lld", []))
+    lld_entries = domain_d.get("lld", [])
+    class_nodes, method_nodes = graph_builder.build_class_and_method_nodes(symbol_table, lld_entries)
     graph_builder.apply_reachability(method_nodes, call_graph)
     nodes.extend(class_nodes)
     nodes.extend(method_nodes)
     edges.extend(graph_builder.build_defines_and_calls_edges(symbol_table, call_graph))
+
+    parameter_nodes, parameter_edges = graph_builder.build_parameter_nodes_and_edges(method_nodes, lld_entries)
+    nodes.extend(parameter_nodes)
+    edges.extend(parameter_edges)
 
     table_nodes, table_edges = graph_builder.build_table_and_database_nodes_and_edges(
         repo_meta.repo_id, config_schema_api, hld, confidence_threshold
@@ -677,9 +682,15 @@ def build_graph_batch(state, confidence_threshold: float) -> tuple[list[GraphNod
     nodes.extend(table_nodes)
     edges.extend(table_edges)
 
+    field_nodes, field_edges = graph_builder.build_field_nodes_and_edges(config_schema_api)
+    nodes.extend(field_nodes)
+    edges.extend(field_edges)
+
     api_nodes, api_edges = graph_builder.build_api_nodes_and_edges(config_schema_api, hld, confidence_threshold)
     nodes.extend(api_nodes)
     edges.extend(api_edges)
+
+    edges.extend(graph_builder.build_method_returns_edges(lld_entries, config_schema_api))
 
     nodes.extend(graph_builder.build_business_capability_nodes(clusters, confidence_threshold))
     feature_nodes, feature_edges = graph_builder.build_feature_nodes_and_edges(clusters)

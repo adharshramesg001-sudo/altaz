@@ -28,6 +28,17 @@ example schema, kept as-is from the prior build. `DEPENDS_ON` between
 `Service` nodes is likewise a disclosed, valuable extension (call-graph
 derived component coupling) the LLD's relationship list doesn't enumerate
 but doesn't forbid either.
+
+`Parameter` (`Method -[:HAS_PARAMETER]-> Parameter`) and `Field`
+(`Table -[:HAS_FIELD]-> Field`) are a further extension, added so a
+method's parameters and a data model's fields are real, queryable graph
+structure -- each carrying a best-effort `required` flag -- instead of
+only the flattened `parameters_json`/`fields_json` summary properties on
+their parent node (which both still carry, for cheap reads). `Method
+-[:RETURNS]-> Table` is populated only when a method's declared return
+type names a `Table`/data model AtlaZ already extracted elsewhere in the
+graph (see `graph_builder.build_method_returns_edges`) -- a deliberately
+narrow, string-matched link, not a full return-shape inference.
 """
 
 from __future__ import annotations
@@ -43,8 +54,10 @@ class NodeLabel(str, Enum):
     FILE = "File"
     CLASS = "Class"
     METHOD = "Method"
+    PARAMETER = "Parameter"
     INTERFACE = "Interface"
     TABLE = "Table"
+    FIELD = "Field"
     DATABASE = "Database"
     API = "API"
     EVENT = "Event"  # schema-only, never populated this build (see module docstring)
@@ -78,6 +91,9 @@ class EdgeType(str, Enum):
     INVOKES = "invokes"
     OWNS = "owns"
     BELONGS_TO = "belongs_to"
+    HAS_PARAMETER = "has_parameter"  # Method -> Parameter
+    HAS_FIELD = "has_field"  # Table -> Field
+    RETURNS = "returns"  # Method -> Table, when the return type names a known data model (best-effort match)
     PUBLISHES = "publishes"
     CONSUMES = "consumes"
     DEPENDS_ON = "depends_on"  # Service<->Service; disclosed extension, see module docstring
@@ -124,8 +140,10 @@ NATURAL_KEY_FIELD: dict[NodeLabel, str] = {
     NodeLabel.FILE: "file_id",
     NodeLabel.CLASS: "class_id",
     NodeLabel.METHOD: "method_id",
+    NodeLabel.PARAMETER: "parameter_id",
     NodeLabel.INTERFACE: "interface_id",
     NodeLabel.TABLE: "table_id",
+    NodeLabel.FIELD: "field_id",
     NodeLabel.DATABASE: "database_id",
     NodeLabel.API: "api_id",
     NodeLabel.EVENT: "event_id",

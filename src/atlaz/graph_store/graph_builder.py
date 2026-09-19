@@ -21,6 +21,7 @@ into the graph as a phantom node.
 from __future__ import annotations
 
 import json
+import re
 
 from atlaz.agents.cross_domain.workflow_trace import WorkflowTrace
 from atlaz.agents.domain_a.gap_detector import GapFinding
@@ -192,6 +193,54 @@ def build_class_and_method_nodes(
     return class_nodes, method_nodes
 
 
+def build_parameter_nodes_and_edges(
+    method_nodes: list[GraphNode], lld_entries: list[LLDEntry] | None = None
+) -> tuple[list[GraphNode], list[GraphEdge]]:
+    """One Parameter node per method/function parameter (from `LLDParser`'s
+    `ParamSpec`s -- the same source `signature`/`return_type` enrichment in
+    `build_class_and_method_nodes` already uses), linked HAS_PARAMETER from
+    its owning Method. Real graph structure instead of the flattened
+    `parameters_json` summary property alone, so a query -- or code
+    generation grounded in this graph -- can ask "what does this method
+    take" directly rather than parsing a blob. `required` is `True` iff the
+    parameter has no default value. Only built for methods that already
+    have a graph node, the same safety `build_class_and_method_nodes`'s
+    enrichment relies on implicitly."""
+    method_keys = {n.key_value for n in method_nodes}
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+    for entry in lld_entries or []:
+        if entry.class_or_function not in method_keys:
+            continue
+        for index, param in enumerate(entry.parameters):
+            if param.name in ("self", "cls"):
+                continue
+            param_id = f"{entry.class_or_function}::param::{index}::{param.name}"
+            nodes.append(
+                GraphNode(
+                    label=NodeLabel.PARAMETER,
+                    key_value=param_id,
+                    properties={
+                        "name": param.name,
+                        "type": param.annotation or "",
+                        "required": param.default is None,
+                        "default": param.default,
+                        "position": index,
+                    },
+                )
+            )
+            edges.append(
+                GraphEdge(
+                    edge_type=EdgeType.HAS_PARAMETER,
+                    source_label=NodeLabel.METHOD,
+                    source_key=entry.class_or_function,
+                    target_label=NodeLabel.PARAMETER,
+                    target_key=param_id,
+                )
+            )
+    return nodes, edges
+
+
 def apply_reachability(method_nodes: list[GraphNode], call_graph: CallGraph) -> None:
     """Mutates each Method node's `reachability` in place: `reachable` if
     anything statically calls it or it's a module-level entry point with
@@ -270,7 +319,10 @@ def build_table_and_database_nodes_and_edges(
                     "name": entity.entity_name,
                     "source_kind": entity.source_kind,
                     "fields_json": json.dumps(
-                        [{"name": f.name, "type": f.field_type, "default": f.default_value} for f in entity.fields]
+                        [
+                            {"name": f.name, "type": f.field_type, "default": f.default_value, "required": f.required}
+                            for f in entity.fields
+                        ]
                     ),
                     **_base_properties(entity.tier, entity.confidence, entity.evidence, confidence_threshold),
                 },
@@ -311,6 +363,44 @@ def build_table_and_database_nodes_and_edges(
     return nodes, edges
 
 
+def build_field_nodes_and_edges(config_schema_api: ConfigSchemaAPI) -> tuple[list[GraphNode], list[GraphEdge]]:
+    """One Field node per data-model field (`DataModelExtractor`'s
+    `FieldInfo`, now including `required`), linked HAS_FIELD from its
+    owning Table -- same rationale as `build_parameter_nodes_and_edges`:
+    `fields_json` stays as a convenience summary property on the Table
+    node, but a query -- or code generation grounded in this graph -- can
+    now also ask "which fields does this data model require" directly."""
+    nodes: list[GraphNode] = []
+    edges: list[GraphEdge] = []
+    for entity in config_schema_api.data_entities:
+        for index, f in enumerate(entity.fields):
+            field_id = f"{entity.entity_name}::{f.name}"
+            nodes.append(
+                GraphNode(
+                    label=NodeLabel.FIELD,
+                    key_value=field_id,
+                    properties={
+                        "name": f.name,
+                        "type": f.field_type or "",
+                        "required": f.required,
+                        "default": f.default_value,
+                        "constraints": f.constraints,
+                        "position": index,
+                    },
+                )
+            )
+            edges.append(
+                GraphEdge(
+                    edge_type=EdgeType.HAS_FIELD,
+                    source_label=NodeLabel.TABLE,
+                    source_key=entity.entity_name,
+                    target_label=NodeLabel.FIELD,
+                    target_key=field_id,
+                )
+            )
+    return nodes, edges
+
+
 def build_api_nodes_and_edges(
     config_schema_api: ConfigSchemaAPI, diagram: ComponentDiagram, confidence_threshold: float
 ) -> tuple[list[GraphNode], list[GraphEdge]]:
@@ -343,6 +433,60 @@ def build_api_nodes_and_edges(
                 )
             )
     return nodes, edges
+
+
+_OPTIONAL_RETURN_TYPE_PATTERN = re.compile(r"^Optional\[(.+)\]$")
+_UNION_NONE_RETURN_TYPE_PATTERN = re.compile(r"^(.+?)\s*\|\s*None$|^None\s*\|\s*(.+)$")
+_LIST_RETURN_TYPE_PATTERN = re.compile(r"^(?:List|list)\[(.+)\]$")
+
+
+def _unwrap_return_type(return_type: str) -> str:
+    """Strips `Optional[...]`/`... | None` and `List[...]`/`list[...]`
+    wrappers, and any module qualifier, down to a bare type name -- e.g.
+    `"Optional[schemas.UserResponse]"` -> `"UserResponse"`. Good enough to
+    match against known `DataEntity` names; not a real type parser."""
+    text = return_type.strip()
+    optional_match = _OPTIONAL_RETURN_TYPE_PATTERN.match(text)
+    if optional_match:
+        text = optional_match.group(1).strip()
+    else:
+        union_match = _UNION_NONE_RETURN_TYPE_PATTERN.match(text)
+        if union_match:
+            text = (union_match.group(1) or union_match.group(2)).strip()
+    list_match = _LIST_RETURN_TYPE_PATTERN.match(text)
+    if list_match:
+        text = list_match.group(1).strip()
+    return text.rsplit(".", 1)[-1]
+
+
+def build_method_returns_edges(
+    lld_entries: list[LLDEntry] | None, config_schema_api: ConfigSchemaAPI
+) -> list[GraphEdge]:
+    """Tier-2 return-shape linking: when a method's declared return type
+    names a data model AtlaZ already extracted (e.g. `-> UserResponse`),
+    link Method -[:RETURNS]-> Table instead of re-deriving the shape -- the
+    fields (and now, required-ness, via `build_field_nodes_and_edges`) are
+    already on that Table's own Field nodes. Deliberately does not attempt
+    to infer a shape for untyped/dynamic returns (e.g. a bare `return
+    {"ok": True}` with no declared type) -- that needs real per-language
+    literal analysis, not string matching, and is out of scope here."""
+    entity_names = {e.entity_name for e in config_schema_api.data_entities}
+    edges: list[GraphEdge] = []
+    for entry in lld_entries or []:
+        if not entry.return_type:
+            continue
+        candidate = _unwrap_return_type(entry.return_type)
+        if candidate in entity_names:
+            edges.append(
+                GraphEdge(
+                    edge_type=EdgeType.RETURNS,
+                    source_label=NodeLabel.METHOD,
+                    source_key=entry.class_or_function,
+                    target_label=NodeLabel.TABLE,
+                    target_key=candidate,
+                )
+            )
+    return edges
 
 
 def _component_for_file(file_path: str | None, diagram: ComponentDiagram) -> str | None:

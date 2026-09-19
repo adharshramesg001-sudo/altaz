@@ -64,7 +64,6 @@ def _heading() -> None:
         "STEP 3",
         "Describe a change in plain English. AtlaZ grounds everything in the knowledge graph and "
         "never writes back to your repository -- review and download the proposal.",
-        anchor_id="modernize",
     )
 
 

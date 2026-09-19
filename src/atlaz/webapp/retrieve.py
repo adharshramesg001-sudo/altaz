@@ -47,7 +47,6 @@ def _heading() -> None:
         "🔎 Retrieve & Document",
         "STEP 2",
         "Ask questions, review links AtlaZ inferred, and generate design docs for an ingested project.",
-        anchor_id="retrieve",
     )
 
 

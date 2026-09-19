@@ -2,19 +2,24 @@ from atlaz.agents.domain_b.business_rule_extractor import BusinessRule
 from atlaz.agents.domain_b.capability_clustering import CapabilityCluster
 from atlaz.agents.domain_d.data_model_extractor import DataEntity, EntityRelationship, FieldInfo
 from atlaz.agents.domain_d.hld_builder import Component, ComponentDiagram, DependsOnEdge
+from atlaz.agents.domain_d.lld_parser import LLDEntry
 from atlaz.analysis.config_schema_api import ConfigSchemaAPI
 from atlaz.graph_store.graph_builder import (
     build_business_rule_nodes,
     build_conflict_edges,
     build_feature_implemented_by_edges,
     build_feature_nodes_and_edges,
+    build_field_nodes_and_edges,
+    build_method_returns_edges,
+    build_parameter_nodes_and_edges,
     build_service_nodes_and_edges,
     build_table_and_database_nodes_and_edges,
 )
-from atlaz.graph_store.schema import EdgeType, NodeLabel
+from atlaz.graph_store.schema import EdgeType, GraphNode, NodeLabel
 from atlaz.orchestration.confidence import Claim
 from atlaz.orchestration.conflicts import Conflict
 from atlaz.orchestration.dispute_resolution import ResolvedClaim
+from atlaz.parsing.models import ParamSpec
 from atlaz.shared.evidence import Evidence
 
 
@@ -54,6 +59,94 @@ def test_table_relationships_become_depends_on_edges_and_belong_to_database():
     assert any(e.edge_type == EdgeType.BELONGS_TO and e.source_key == "Order" for e in edges)
     assert any(e.edge_type == EdgeType.DEPENDS_ON and e.source_key == "Order" and e.target_key == "Customer" for e in edges)
     assert any(e.edge_type == EdgeType.OWNS and e.source_key == "orders" and e.target_key == "Order" for e in edges)
+
+
+def test_parameter_nodes_and_edges_link_to_method_with_required_flag():
+    method_nodes = [GraphNode(label=NodeLabel.METHOD, key_value="billing.compute_late_fee", properties={})]
+    lld_entries = [
+        LLDEntry(
+            class_or_function="billing.compute_late_fee",
+            signature="compute_late_fee(order_id: int, discount: float = 0.0) -> float",
+            parameters=[
+                ParamSpec(name="order_id", annotation="int"),
+                ParamSpec(name="discount", annotation="float", default="0.0"),
+            ],
+            return_type="float",
+        ),
+        # No matching Method node for this one -- must be skipped, not written as a dangling edge.
+        LLDEntry(class_or_function="billing.orphan_entry", signature="orphan_entry(x) -> None", parameters=[ParamSpec(name="x")]),
+    ]
+
+    nodes, edges = build_parameter_nodes_and_edges(method_nodes, lld_entries)
+
+    assert len(nodes) == 2
+    assert all(n.label == NodeLabel.PARAMETER for n in nodes)
+    order_id = next(n for n in nodes if n.properties["name"] == "order_id")
+    assert order_id.properties["required"] is True
+    discount = next(n for n in nodes if n.properties["name"] == "discount")
+    assert discount.properties["required"] is False
+    assert discount.properties["default"] == "0.0"
+    assert len(edges) == 2
+    assert all(e.edge_type == EdgeType.HAS_PARAMETER and e.source_key == "billing.compute_late_fee" for e in edges)
+
+
+def test_parameter_nodes_skip_self_and_cls():
+    method_nodes = [GraphNode(label=NodeLabel.METHOD, key_value="billing.BillingPlan.total", properties={})]
+    lld_entries = [
+        LLDEntry(
+            class_or_function="billing.BillingPlan.total",
+            signature="total(self) -> float",
+            parameters=[ParamSpec(name="self")],
+            is_method=True,
+        )
+    ]
+
+    nodes, edges = build_parameter_nodes_and_edges(method_nodes, lld_entries)
+
+    assert nodes == []
+    assert edges == []
+
+
+def test_field_nodes_and_edges_link_to_table_with_required_flag():
+    entity = DataEntity(
+        entity_name="Order",
+        fields=[
+            FieldInfo(name="id", field_type="int", required=True),
+            FieldInfo(name="notes", field_type="Optional[str]", required=False),
+        ],
+    )
+    config_schema_api = ConfigSchemaAPI(data_entities=[entity])
+
+    nodes, edges = build_field_nodes_and_edges(config_schema_api)
+
+    assert len(nodes) == 2
+    assert all(n.label == NodeLabel.FIELD for n in nodes)
+    id_field = next(n for n in nodes if n.properties["name"] == "id")
+    assert id_field.properties["required"] is True
+    notes_field = next(n for n in nodes if n.properties["name"] == "notes")
+    assert notes_field.properties["required"] is False
+    assert len(edges) == 2
+    assert all(e.edge_type == EdgeType.HAS_FIELD and e.source_key == "Order" for e in edges)
+
+
+def test_method_returns_edge_links_to_matching_data_entity():
+    entity = DataEntity(entity_name="UserResponse", fields=[FieldInfo(name="id")])
+    config_schema_api = ConfigSchemaAPI(data_entities=[entity])
+    lld_entries = [
+        LLDEntry(class_or_function="app.get_user", signature="get_user() -> UserResponse", return_type="UserResponse"),
+        LLDEntry(class_or_function="app.maybe_get_user", signature="...", return_type="Optional[UserResponse]"),
+        LLDEntry(class_or_function="app.list_users", signature="...", return_type="list[UserResponse]"),
+        LLDEntry(class_or_function="app.health", signature="...", return_type="dict"),
+    ]
+
+    edges = build_method_returns_edges(lld_entries, config_schema_api)
+
+    targets = {(e.source_key, e.target_key) for e in edges}
+    assert ("app.get_user", "UserResponse") in targets
+    assert ("app.maybe_get_user", "UserResponse") in targets
+    assert ("app.list_users", "UserResponse") in targets
+    assert len(edges) == 3  # app.health's "dict" doesn't name any known data entity
+    assert all(e.edge_type == EdgeType.RETURNS and e.target_label == NodeLabel.TABLE for e in edges)
 
 
 def test_service_nodes_produce_contains_and_depends_on_edges():

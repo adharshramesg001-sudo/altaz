@@ -20,8 +20,6 @@ _CSS = f"""
 .block-container {{ padding-top: 1.6rem; max-width: 1120px; }}
 h1 {{ color: {NAVY}; }}
 
-[id^="section-"] {{ scroll-margin-top: 4.5rem; }}
-
 .atlaz-hero {{
     background: linear-gradient(135deg, {NAVY} 0%, {TEAL} 100%);
     border-radius: 18px; padding: 32px 38px; margin-bottom: 1.6rem; color: white;
@@ -42,23 +40,24 @@ h1 {{ color: {NAVY}; }}
     font-size: 0.8rem; font-weight: 600; letter-spacing: 0.03em;
 }}
 
-.section-divider {{ margin: 2.4rem 0 1.8rem 0; border: none; border-top: 2px solid #E3E8EF; }}
-
-/* Tinted "bands" behind each pipeline stage so the single scrolling page
-   reads as distinct steps rather than one flat wall of white. */
-.st-key-band-ingest, .st-key-band-project, .st-key-band-retrieve, .st-key-band-modernize {{
+/* Tinted "bands" behind each pipeline stage's tab panel so the three tabs
+   feel like distinct rooms rather than the same white panel relabeled. */
+.st-key-band-ingest, .st-key-band-retrieve, .st-key-band-modernize {{
     border-radius: 16px; padding: 1.6rem 1.8rem 1.8rem;
 }}
 .st-key-band-ingest {{ background: linear-gradient(180deg, rgba(31,122,140,0.07) 0%, rgba(31,122,140,0.015) 100%); }}
-.st-key-band-project {{ background: rgba(91, 102, 119, 0.06); }}
 .st-key-band-retrieve {{ background: linear-gradient(180deg, rgba(22,50,79,0.06) 0%, rgba(22,50,79,0.012) 100%); }}
 .st-key-band-modernize {{ background: linear-gradient(180deg, rgba(122,79,176,0.07) 0%, rgba(122,79,176,0.015) 100%); }}
 
-.atlaz-nav a {{
-    display: block; padding: 6px 10px; margin-bottom: 2px; border-radius: 8px; color: {NAVY};
-    text-decoration: none; font-size: 0.9rem; font-weight: 500;
+/* Top-level tabs -- bigger, bolder, with an underline sweep on the active
+   tab instead of Streamlit's default thin/quiet tab strip. */
+.stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 2px solid #E3E8EF; }}
+.stTabs [data-baseweb="tab"] {{
+    height: 46px; padding: 0 18px; font-size: 1.0rem; font-weight: 600; color: #5B6677;
 }}
-.atlaz-nav a:hover {{ background: #EEF3F8; }}
+.stTabs [data-baseweb="tab"]:hover {{ color: {NAVY}; background: #EEF3F8; border-radius: 10px 10px 0 0; }}
+.stTabs [aria-selected="true"] {{ color: {TEAL} !important; }}
+.stTabs [data-baseweb="tab-highlight"] {{ background-color: {TEAL}; height: 3px; }}
 
 .stat {{ background: white; border: 1px solid #E3E8EF; border-radius: 14px; padding: 16px 18px; }}
 .stat .num {{ font-size: 1.9rem; font-weight: 700; color: {NAVY}; line-height: 1.15; }}
@@ -88,8 +87,8 @@ def inject() -> None:
 
 
 def hero(title: str, tagline: str, badges: list[str] | None = None) -> None:
-    """Gradient banner at the top of the single-page app -- the project's
-    name/identity, shown once, above all three sections."""
+    """Gradient banner at the top of the app -- the project's name/identity,
+    shown once, above the tabs."""
     badges_html = ""
     if badges:
         pills = "".join(f'<span class="pill">{b}</span>' for b in badges)
@@ -100,24 +99,7 @@ def hero(title: str, tagline: str, badges: list[str] | None = None) -> None:
     )
 
 
-def anchor(section_id: str) -> None:
-    """An in-page scroll target -- pair with `sidebar_nav()` so the sidebar
-    can jump straight to a section on this single scrolling page."""
-    st.markdown(f'<div id="section-{section_id}"></div>', unsafe_allow_html=True)
-
-
-def sidebar_nav(items: list[tuple[str, str]]) -> None:
-    links = "".join(f'<a href="#section-{section_id}">{label}</a>' for label, section_id in items)
-    st.markdown(f'<div class="atlaz-nav">{links}</div>', unsafe_allow_html=True)
-
-
-def section_divider() -> None:
-    st.markdown('<hr class="section-divider" />', unsafe_allow_html=True)
-
-
-def page_heading(title: str, badge: str, caption: str, anchor_id: str | None = None) -> None:
-    if anchor_id:
-        anchor(anchor_id)
+def page_heading(title: str, badge: str, caption: str) -> None:
     st.markdown(
         f'<div class="atlaz-header"><h1>{title}</h1><span class="badge">{badge}</span></div>',
         unsafe_allow_html=True,

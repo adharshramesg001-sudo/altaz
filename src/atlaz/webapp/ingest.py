@@ -40,7 +40,6 @@ def render() -> None:
         "Point AtlaZ at a local folder or a git repository URL. It reads the code and builds an "
         "evidence-grounded knowledge graph -- once it's done, pick the project below to ask "
         "questions, generate design docs, or modernize it.",
-        anchor_id="ingest",
     )
 
     source = st.text_input(

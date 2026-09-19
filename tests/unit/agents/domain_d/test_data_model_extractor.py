@@ -65,3 +65,39 @@ def test_extracts_entities_from_raw_sql_migration(tmp_path: Path):
     field_names = {f.name for f in customers.fields}
     assert "id" in field_names
     assert "email" in field_names
+
+    required_by_name = {f.name: f.required for f in customers.fields}
+    assert required_by_name["id"] is True  # PRIMARY KEY
+    assert required_by_name["email"] is False  # no NOT NULL/PRIMARY KEY
+
+
+REQUIRED_FIELD_SOURCE = '''
+class Base:
+    pass
+
+
+class UserProfile(Base):
+    id: int
+    nickname: Optional[str] = None
+    email: str = Field(...)
+    bio: str = Column(String, nullable=True)
+    age: int = Column(Integer, nullable=False)
+    country: str = "US"
+'''
+
+
+def test_infers_required_and_optional_fields_from_annotations_and_kwargs(tmp_path: Path):
+    (tmp_path / "models.py").write_text(REQUIRED_FIELD_SOURCE)
+    inventory = RepoIngestor().ingest(str(tmp_path))
+    parsed = parse_inventory(inventory, ParserRegistry())
+
+    entities = DataModelExtractor().run(inventory, parsed)
+    profile = next(e for e in entities if e.entity_name == "UserProfile")
+    required_by_name = {f.name: f.required for f in profile.fields}
+
+    assert required_by_name["id"] is True  # bare annotation, no default -> required
+    assert required_by_name["nickname"] is False  # Optional[...] with default None
+    assert required_by_name["email"] is True  # Field(...) ellipsis -> explicitly required
+    assert required_by_name["bio"] is False  # nullable=True
+    assert required_by_name["age"] is True  # nullable=False
+    assert required_by_name["country"] is False  # plain literal default
